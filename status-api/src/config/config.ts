@@ -7,6 +7,11 @@ export interface ServerConfig {
   version: string;
 }
 
+export interface GroupsConfig {
+  defaultGroupName: string;
+  defaultGroupJoinKey: string;
+}
+
 export interface AppConfig {
   mongoDb: MongoDbConfig;
   server: ServerConfig;
@@ -19,5 +24,9 @@ export default () => ({
   },
   mongoDb:{
     url: process.env.MONGODB_URL,
-  }
+  },
+  groups: {
+    defaultGroupName: process.env.DEFAULT_GROUP_NAME,
+    defaultGroupJoinKey: process.env.DEFAULT_GROUP_JOIN_KEY,
+  },
 } as AppConfig);
