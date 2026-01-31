@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Group, GroupDocument } from './schemas/group.schema';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
 import { createHash } from 'crypto';
 import { CreateGroupDto, JoinGroupDto } from './dtos/group.dto';
 import * as bcrypt from 'bcrypt';
+import { User, UserDocument } from '../users/schemas/user.schema';
 import { dbConstants } from 'src/common/db/constants';
 
 @Injectable()
@@ -14,6 +15,7 @@ export class GroupsService {
 
   constructor(
     @InjectModel(Group.name) private readonly groupModel: Model<GroupDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
   async createGroup(dto: CreateGroupDto) {
@@ -34,6 +36,35 @@ export class GroupsService {
     };
   }
 
+  async getAllGroups() {
+    const groups = await this.groupModel.find().exec();
+    return groups.map((g) => ({
+      _id: g._id.toString(),
+      name: g.name,
+      joinKeyHash: g.joinKeyHash,
+      createdAt: (g as any).createdAt,
+      updatedAt: (g as any).updatedAt,
+    }));
+  }
+
+  async getUserGroups(userId: string) {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) throw new NotFoundException('User not found');
+
+    const groupIds = user.groups.map((g) => g.groupId);
+    const groups = await this.groupModel
+      .find({ _id: { $in: groupIds } })
+      .exec();
+
+    return groups.map((g) => ({
+      _id: g._id.toString(),
+      name: g.name,
+      joinKeyHash: g.joinKeyHash,
+      createdAt: (g as any).createdAt,
+      updatedAt: (g as any).updatedAt,
+    }));
+  }
+
   async joinGroup(dto: JoinGroupDto) {
     const joinKeyId = this.toJoinKeyId(dto.joinKey);
 
@@ -48,6 +79,39 @@ export class GroupsService {
     return {
       id: group._id.toString(),
       name: group.name,
+    };
+  }
+
+  async joinGroupAsUser(groupId: string, joinKey: string, userId: string) {
+    const group = await this.groupModel.findById(groupId).exec();
+    if (!group) throw new NotFoundException('Group not found');
+
+    const ok = await bcrypt.compare(joinKey, group.joinKeyHash);
+    if (!ok) throw new BadRequestException('Invalid join key');
+
+    const groupObjectId = new Types.ObjectId(groupId);
+    const user = await this.userModel.findById(userId);
+    if (user && !user.groups.some((g) => g.groupId.equals(groupObjectId))) {
+      user.groups.push({
+        groupId: groupObjectId,
+        data: {
+          status: {
+            state: 'NOT_AVAILABLE',
+            gameIds: [],
+            message: null,
+            updatedAt: new Date(),
+          },
+        },
+      } as any);
+      await user.save();
+    }
+
+    return {
+      _id: group._id.toString(),
+      name: group.name,
+      joinKeyHash: group.joinKeyHash,
+      createdAt: (group as any).createdAt,
+      updatedAt: (group as any).updatedAt,
     };
   }
 

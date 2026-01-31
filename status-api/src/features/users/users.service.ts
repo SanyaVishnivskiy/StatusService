@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { User, UserDocument } from './schemas/user.schema';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
@@ -40,7 +40,7 @@ export class UsersService {
       usernameLower,
       passwordHash,
       tokenCiphertext,
-      groupIds: [],
+      groups: [],
       lastSeenAt: new Date(),
     });
 
@@ -81,7 +81,6 @@ export class UsersService {
   }
 
   async logout(userId: string): Promise<{ ok: boolean }> {
-    // Generate new token to rotate it
     const newRawToken = this.generateToken();
     const newTokenCiphertext = this.encryptToken(newRawToken);
 
@@ -110,12 +109,99 @@ export class UsersService {
     return null;
   }
 
-  private generateToken(): string {
-    return crypto.randomBytes(32).toString('hex');
+  async updateLastSeen(userId: string): Promise<void> {
+    await this.userModel.updateOne({ _id: userId }, { lastSeenAt: new Date() });
   }
 
-  private hashToken(token: string): string {
-    return crypto.createHash('sha256').update(token).digest('hex');
+  async addToGroup(userId: string, groupId: string): Promise<void> {
+    const groupObjectId = new Types.ObjectId(groupId);
+    
+    // Check if user is already in group
+    const user = await this.userModel.findById(userId);
+    if (user && !user.groups.some((g) => g.groupId.equals(groupObjectId))) {
+      user.groups.push({
+        groupId: groupObjectId,
+        data: {
+          status: {
+            state: 'NOT_AVAILABLE',
+            gameIds: [],
+            message: null,
+            updatedAt: new Date(),
+          },
+        },
+      } as any);
+      await user.save();
+    }
+  }
+
+  async getGroupUsers(groupId: string): Promise<any[]> {
+    const groupObjectId = new Types.ObjectId(groupId);
+    const users = await this.userModel.find({ 'groups.groupId': groupObjectId }).exec();
+    return users.map((user) => ({
+      _id: user._id.toString(),
+      username: user.username,
+      usernameLower: user.usernameLower,
+      groups: user.groups.map((g) => ({
+        groupId: g.groupId.toString(),
+        data: {
+          status: {
+            state: g.data?.status?.state || 'NOT_AVAILABLE',
+            gameIds: g.data?.status?.gameIds?.map((id) => id.toString()) || [],
+            message: g.data?.status?.message || null,
+            updatedAt: g.data?.status?.updatedAt,
+          },
+        },
+      })),
+      lastSeenAt: user.lastSeenAt,
+      createdAt: (user as any).createdAt,
+      updatedAt: (user as any).updatedAt,
+    }));
+  }
+
+  async getUserGroupIds(userId: string): Promise<string[]> {
+    const user = await this.userModel.findById(userId);
+    if (!user) return [];
+    return user.groups.map((g) => g.groupId.toString());
+  }
+
+  async updateUserStatus(
+    userId: string,
+    groupId: string,
+    status: { state: string; gameIds?: string[]; message?: string },
+  ): Promise<any> {
+    const groupObjectId = new Types.ObjectId(groupId);
+    const gameIds = status.state === 'READY' ? status.gameIds?.map((id) => new Types.ObjectId(id)) || [] : [];
+
+    const user = await this.userModel.findOneAndUpdate(
+      { _id: userId, 'groups.groupId': groupObjectId },
+      {
+        $set: {
+          'groups.$.data.status': {
+            state: status.state,
+            gameIds,
+            message: status.message || null,
+            updatedAt: new Date(),
+          },
+        },
+      },
+      { new: true },
+    );
+
+    if (!user) throw new Error('User or group not found');
+
+    const groupData = user.groups.find((g) => g.groupId.equals(groupObjectId));
+    return {
+      groupId,
+      userId,
+      state: groupData?.data?.status?.state,
+      gameIds: groupData?.data?.status?.gameIds?.map((id) => id.toString()) || [],
+      message: groupData?.data?.status?.message,
+      updatedAt: groupData?.data?.status?.updatedAt,
+    };
+  }
+
+  private generateToken(): string {
+    return crypto.randomBytes(32).toString('hex');
   }
 
   private encryptToken(token: string): string {
@@ -124,8 +210,7 @@ export class UsersService {
     let encrypted = cipher.update(token, 'utf8', 'hex');
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag();
-    
-    // Combine iv + authTag + encrypted
+
     return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
   }
 
@@ -139,7 +224,7 @@ export class UsersService {
     decipher.setAuthTag(authTag);
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
-    
+
     return decrypted;
   }
 }

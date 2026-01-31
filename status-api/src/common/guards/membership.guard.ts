@@ -17,7 +17,7 @@ export class MembershipGuard implements CanActivate {
     }
 
     const groupObjectId = new Types.ObjectId(groupId);
-    const isMember = user.groupIds.some((id: Types.ObjectId) => id.equals(groupObjectId));
+    const isMember = user.groups.some((g: any) => g.groupId.equals(groupObjectId));
 
     if (!isMember) {
       throw new ForbiddenException('User is not a member of this group');
