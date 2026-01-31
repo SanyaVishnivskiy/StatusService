@@ -7,7 +7,6 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AppData, AppDataSchema } from './app.schema';
 import { GroupsModule } from './features/groups/groups.module';
 import { SeedModule } from './features/seed/seed.module';
-import { UsersService } from './features/users/users.service';
 import { UsersModule } from './features/users/users.module';
 
 @Module({
@@ -29,6 +28,6 @@ import { UsersModule } from './features/users/users.module';
     UsersModule,
   ],
   controllers: [AppController],
-  providers: [AppService, UsersService],
+  providers: [AppService],
 })
 export class AppModule {}

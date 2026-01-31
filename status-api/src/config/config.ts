@@ -12,9 +12,15 @@ export interface GroupsConfig {
   defaultGroupJoinKey: string;
 }
 
+export interface AuthConfig {
+  tokenEncryptionKey: string;
+}
+
 export interface AppConfig {
   mongoDb: MongoDbConfig;
   server: ServerConfig;
+  groups: GroupsConfig;
+  auth: AuthConfig;
 }
 
 export default () => ({
@@ -28,5 +34,8 @@ export default () => ({
   groups: {
     defaultGroupName: process.env.DEFAULT_GROUP_NAME,
     defaultGroupJoinKey: process.env.DEFAULT_GROUP_JOIN_KEY,
+  },
+  auth: {
+    tokenEncryptionKey: process.env.TOKEN_ENC_KEY,
   },
 } as AppConfig);
