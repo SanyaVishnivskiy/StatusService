@@ -8,7 +8,6 @@ import { AppData, AppDataSchema } from './app.schema';
 import { GroupsModule } from './features/groups/groups.module';
 import { SeedModule } from './features/seed/seed.module';
 import { UsersModule } from './features/users/users.module';
-import { StatusesModule } from './features/statuses/statuses.module';
 
 @Module({
   imports: [
@@ -27,7 +26,6 @@ import { StatusesModule } from './features/statuses/statuses.module';
     GroupsModule,
     SeedModule,
     UsersModule,
-    StatusesModule,
   ],
   controllers: [AppController],
   providers: [AppService],

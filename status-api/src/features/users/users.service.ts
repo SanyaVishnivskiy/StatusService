@@ -1,16 +1,17 @@
-import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { User, UserDocument } from './schemas/user.schema';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
-import { SignupDto } from './dtos/signup.dto';
-import { LoginDto } from './dtos/login.dto';
+import { LoginDto, LoginResponseDto, SignupDto } from './dtos/login.dto';
 import { AuthConfig } from 'src/config/config';
+import { GroupDataDto, GroupUserDto, StatusDataDto, UserDto } from './dtos/user.dto';
+import { decryptToken, encryptToken, generateToken } from 'src/common/crypto/encryption.utils';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
   private readonly tokenEncryptionKey: Buffer;
 
   constructor(
@@ -21,7 +22,7 @@ export class UsersService {
     this.tokenEncryptionKey = Buffer.from(authConfig.tokenEncryptionKey, 'hex');
   }
 
-  async signup(signupDto: SignupDto): Promise<{ token: string; user: { id: string; username: string } }> {
+  async signup(signupDto: SignupDto): Promise<LoginResponseDto> {
     const { username, password } = signupDto;
 
     const usernameLower = username.toLowerCase();
@@ -32,8 +33,8 @@ export class UsersService {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const rawToken = this.generateToken();
-    const tokenCiphertext = this.encryptToken(rawToken);
+    const rawToken = generateToken();
+    const tokenCiphertext = encryptToken(rawToken, this.tokenEncryptionKey);
 
     const user = await this.userModel.create({
       username,
@@ -45,7 +46,7 @@ export class UsersService {
     });
 
     return {
-      token: rawToken,
+      token: `${user.username}:${rawToken}`,
       user: {
         id: user._id.toString(),
         username: user.username,
@@ -53,7 +54,7 @@ export class UsersService {
     };
   }
 
-  async login(loginDto: LoginDto): Promise<{ token: string; user: { id: string; username: string } }> {
+  async login(loginDto: LoginDto): Promise<LoginResponseDto> {
     const { username, password } = loginDto;
 
     const usernameLower = username.toLowerCase();
@@ -67,12 +68,12 @@ export class UsersService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const rawToken = this.decryptToken(user.tokenCiphertext);
+    const rawToken = decryptToken(user.tokenCiphertext, this.tokenEncryptionKey);
 
     await this.updateLastSeen(user._id.toString());
 
     return {
-      token: rawToken,
+      token: `${user.username}:${rawToken}`,
       user: {
         id: user._id.toString(),
         username: user.username,
@@ -80,9 +81,9 @@ export class UsersService {
     };
   }
 
-  async logout(userId: string): Promise<{ ok: boolean }> {
-    const newRawToken = this.generateToken();
-    const newTokenCiphertext = this.encryptToken(newRawToken);
+  async logout(userId: string): Promise<void> {
+    const newRawToken = generateToken();
+    const newTokenCiphertext = encryptToken(newRawToken, this.tokenEncryptionKey);
 
     await this.userModel.updateOne(
       { _id: userId },
@@ -90,22 +91,31 @@ export class UsersService {
         tokenCiphertext: newTokenCiphertext,
       },
     );
-
-    return { ok: true };
   }
 
-  async findByToken(token: string): Promise<UserDocument | null> {
-    const users = await this.userModel.find({});
-    for (const user of users) {
-      try {
-        const decrypted = this.decryptToken(user.tokenCiphertext);
-        if (decrypted === token) {
-          return user;
-        }
-      } catch {
-        // Skip if decryption fails
+  async tryAuthenticate(username: string, token: string): Promise<UserDto | null> {
+    const user = await this.userModel.findOne({ username }).lean().exec();
+    if (!user)
+      return null;
+
+    try {
+      const decrypted = decryptToken(user.tokenCiphertext, this.tokenEncryptionKey);
+      if (!decrypted) {
+        this.logger.warn(`Failed to decrypt token for user ${username}`);
+        return null;
       }
+
+      if (decrypted !== token) {
+        this.logger.warn(`Token mismatch for user ${username}`);
+        return null;
+      }
+
+      await this.updateLastSeen(user._id.toString());
+      return this.mapToUserDto(user);
+    } catch (error) {
+      this.logger.warn(`Failed to decrypt token for user ${username}: ${error.message}`);
     }
+
     return null;
   }
 
@@ -113,119 +123,63 @@ export class UsersService {
     await this.userModel.updateOne({ _id: userId }, { lastSeenAt: new Date() });
   }
 
-  async addToGroup(userId: string, groupId: string): Promise<void> {
-    const groupObjectId = new Types.ObjectId(groupId);
-    
-    // Check if user is already in group
-    const user = await this.userModel.findById(userId);
-    if (user && !user.groups.some((g) => g.groupId.equals(groupObjectId))) {
-      user.groups.push({
-        groupId: groupObjectId,
-        data: {
-          status: {
-            state: 'NOT_AVAILABLE',
-            gameIds: [],
-            message: null,
-            updatedAt: new Date(),
-          },
-        },
-      } as any);
-      await user.save();
-    }
-  }
+  async getGroupUsers(groupId: string): Promise<GroupUserDto[]> {
+    const users = await this.userModel
+      .find({ 'groups.groupId': new Types.ObjectId(groupId) })
+      .lean()
+      .exec();
 
-  async getGroupUsers(groupId: string): Promise<any[]> {
-    const groupObjectId = new Types.ObjectId(groupId);
-    const users = await this.userModel.find({ 'groups.groupId': groupObjectId }).exec();
-    return users.map((user) => ({
-      _id: user._id.toString(),
-      username: user.username,
-      usernameLower: user.usernameLower,
-      groups: user.groups.map((g) => ({
-        groupId: g.groupId.toString(),
-        data: {
-          status: {
-            state: g.data?.status?.state || 'NOT_AVAILABLE',
-            gameIds: g.data?.status?.gameIds?.map((id) => id.toString()) || [],
-            message: g.data?.status?.message || null,
-            updatedAt: g.data?.status?.updatedAt,
-          },
-        },
-      })),
-      lastSeenAt: user.lastSeenAt,
-      createdAt: (user as any).createdAt,
-      updatedAt: (user as any).updatedAt,
+    return users
+      .map((user) => this.mapToUserDto(user))
+      .map((user) => ({
+        ...user,
+        data: user.groups
+          .filter((g) => g.groupId === groupId)
+          .map((g) => g.data)[0],
     }));
   }
 
-  async getUserGroupIds(userId: string): Promise<string[]> {
-    const user = await this.userModel.findById(userId);
-    if (!user) return [];
-    return user.groups.map((g) => g.groupId.toString());
-  }
-
   async updateUserStatus(
-    userId: string,
+    user: UserDto,
     groupId: string,
-    status: { state: string; gameIds?: string[]; message?: string },
-  ): Promise<any> {
+    data: GroupDataDto,
+  ): Promise<void> {
     const groupObjectId = new Types.ObjectId(groupId);
-    const gameIds = status.state === 'READY' ? status.gameIds?.map((id) => new Types.ObjectId(id)) || [] : [];
 
-    const user = await this.userModel.findOneAndUpdate(
-      { _id: userId, 'groups.groupId': groupObjectId },
+    await this.userModel.findOneAndUpdate(
+      { _id: user.id, 'groups.groupId': groupObjectId },
       {
         $set: {
-          'groups.$.data.status': {
-            state: status.state,
-            gameIds,
-            message: status.message || null,
-            updatedAt: new Date(),
-          },
+          'groups.$.data': data,
         },
       },
       { new: true },
     );
 
-    if (!user) throw new Error('User or group not found');
+    if (!user)
+      throw new Error('User or group not found');
 
-    const groupData = user.groups.find((g) => g.groupId.equals(groupObjectId));
+    await this.updateLastSeen(user.id);
+  }
+
+  private mapToUserDto(user: UserDocument): UserDto {
     return {
-      groupId,
-      userId,
-      state: groupData?.data?.status?.state,
-      gameIds: groupData?.data?.status?.gameIds?.map((id) => id.toString()) || [],
-      message: groupData?.data?.status?.message,
-      updatedAt: groupData?.data?.status?.updatedAt,
+      id: user._id.toString(),
+      username: user.username,
+      lastSeenAt: user.lastSeenAt,
+      groups: user.groups.map((g) => ({
+        groupId: g.groupId.toString(),
+        data: {
+          status: g.data?.status
+            ? {
+                state: g.data.status.state,
+                gameIds: g.data.status.gameIds?.map((id) => id.toString()) || [],
+                message: g.data.status.message,
+                updatedAt: g.data.status.updatedAt,
+              }
+            : undefined,
+        },
+      })),
     };
   }
-
-  private generateToken(): string {
-    return crypto.randomBytes(32).toString('hex');
-  }
-
-  private encryptToken(token: string): string {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', this.tokenEncryptionKey, iv);
-    let encrypted = cipher.update(token, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    const authTag = cipher.getAuthTag();
-
-    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
-  }
-
-  private decryptToken(ciphertext: string): string {
-    const parts = ciphertext.split(':');
-    const iv = Buffer.from(parts[0], 'hex');
-    const authTag = Buffer.from(parts[1], 'hex');
-    const encrypted = parts[2];
-
-    const decipher = crypto.createDecipheriv('aes-256-gcm', this.tokenEncryptionKey, iv);
-    decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-
-    return decrypted;
-  }
 }
-

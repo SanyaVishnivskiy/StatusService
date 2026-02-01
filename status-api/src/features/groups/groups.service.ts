@@ -2,29 +2,26 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Group, GroupDocument } from './schemas/group.schema';
 import { Model, Types } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
-import { createHash } from 'crypto';
-import { CreateGroupDto, JoinGroupDto } from './dtos/group.dto';
+import { CreateGroupDto, CreateGroupResponseDto, GroupDto, JoinGroupDto } from './dtos/group.dto';
 import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../users/schemas/user.schema';
-import { dbConstants } from 'src/common/db/constants';
+import { HASHING_SALT_ROUNDS } from 'src/common/crypto/hashing.utils';
+import { UserDto } from '../users/dtos/user.dto';
 
 @Injectable()
 export class GroupsService {
   private readonly logger = new Logger(GroupsService.name);
-  private readonly saltRounds = 10;
 
   constructor(
     @InjectModel(Group.name) private readonly groupModel: Model<GroupDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
-  async createGroup(dto: CreateGroupDto) {
-    const joinKeyId = this.toJoinKeyId(dto.joinKey);
-    const joinKeyHash = await bcrypt.hash(dto.joinKey, this.saltRounds);
+  async createGroup(dto: CreateGroupDto): Promise<CreateGroupResponseDto> {
+    const joinKeyHash = await bcrypt.hash(dto.joinKey, HASHING_SALT_ROUNDS);
 
     const created = await this.groupModel.create({
       name: dto.name,
-      joinKeyId,
       joinKeyHash,
     });
 
@@ -36,39 +33,23 @@ export class GroupsService {
     };
   }
 
-  async getAllGroups() {
-    const groups = await this.groupModel.find().exec();
+  async getAllGroups(user: UserDto): Promise<GroupDto[]> {
+    const groups = await this.groupModel.find().lean().exec();
+    const memberGroupIds = new Set(
+      user.groups.map((g) => g.groupId.toString()),
+    );
+
     return groups.map((g) => ({
-      _id: g._id.toString(),
+      id: g._id.toString(),
       name: g.name,
-      joinKeyHash: g.joinKeyHash,
+      joined: memberGroupIds.has(g._id.toString()),
       createdAt: (g as any).createdAt,
       updatedAt: (g as any).updatedAt,
     }));
   }
 
-  async getUserGroups(userId: string) {
-    const user = await this.userModel.findById(userId).exec();
-    if (!user) throw new NotFoundException('User not found');
-
-    const groupIds = user.groups.map((g) => g.groupId);
-    const groups = await this.groupModel
-      .find({ _id: { $in: groupIds } })
-      .exec();
-
-    return groups.map((g) => ({
-      _id: g._id.toString(),
-      name: g.name,
-      joinKeyHash: g.joinKeyHash,
-      createdAt: (g as any).createdAt,
-      updatedAt: (g as any).updatedAt,
-    }));
-  }
-
-  async joinGroup(dto: JoinGroupDto) {
-    const joinKeyId = this.toJoinKeyId(dto.joinKey);
-
-    const group = await this.groupModel.findOne({ joinKeyId }).exec();
+  async joinGroup(dto: JoinGroupDto, user: UserDto): Promise<void> {
+    const group = await this.groupModel.findOne({ _id: dto.id }).exec();
     if (!group)
       throw new NotFoundException('Group not found.');
 
@@ -76,88 +57,48 @@ export class GroupsService {
     if (!ok)
       throw new BadRequestException('Invalid join key.');
 
-    return {
-      id: group._id.toString(),
-      name: group.name,
-    };
-  }
-
-  async joinGroupAsUser(groupId: string, joinKey: string, userId: string) {
-    const group = await this.groupModel.findById(groupId).exec();
-    if (!group) throw new NotFoundException('Group not found');
-
-    const ok = await bcrypt.compare(joinKey, group.joinKeyHash);
-    if (!ok) throw new BadRequestException('Invalid join key');
-
-    const groupObjectId = new Types.ObjectId(groupId);
-    const user = await this.userModel.findById(userId);
-    if (user && !user.groups.some((g) => g.groupId.equals(groupObjectId))) {
-      user.groups.push({
+    const groupObjectId = new Types.ObjectId(dto.id);
+    const userDoc = await this.userModel.findById(user.id);
+    if (userDoc && !userDoc.groups.some((g) => g.groupId.equals(groupObjectId))) {
+      userDoc.groups.push({
         groupId: groupObjectId,
-        data: {
-          status: {
-            state: 'NOT_AVAILABLE',
-            gameIds: [],
-            message: null,
-            updatedAt: new Date(),
-          },
-        },
-      } as any);
-      await user.save();
+        data: null,
+      });
+      await userDoc.save();
     }
-
-    return {
-      _id: group._id.toString(),
-      name: group.name,
-      joinKeyHash: group.joinKeyHash,
-      createdAt: (group as any).createdAt,
-      updatedAt: (group as any).updatedAt,
-    };
   }
 
-  async rotateJoinKey(groupId: string, newJoinKey: string) {
-    const joinKeyId = this.toJoinKeyId(newJoinKey);
-    const joinKeyHash = await bcrypt.hash(newJoinKey, this.saltRounds);
+  async rotateJoinKey(groupId: string, newJoinKey: string): Promise<void> {
+    const joinKeyHash = await bcrypt.hash(newJoinKey, HASHING_SALT_ROUNDS);
 
     const updated = await this.groupModel
       .findByIdAndUpdate(
         groupId,
-        { joinKeyId, joinKeyHash },
+        { joinKeyHash },
         { new: true },
       )
       .exec();
 
     if (!updated)
       throw new NotFoundException('Group not found.');
-
-    return { id: updated._id.toString(), name: updated.name };
   }
 
-  async ensureDefaultGroup(name: string, joinKey: string) {
+  async ensureDefaultGroupExists(name: string, joinKey: string) {
     if (!name || !joinKey) return;
 
-    const joinKeyId = this.toJoinKeyId(joinKey);
-
-    // Prefer stable lookup by joinKeyId (fast + indexed)
-    const existing = await this.groupModel.findOne({ joinKeyId }).exec();
+    const existing = await this.groupModel.findOne({ name }).exec();
     if (existing) {
       this.logger.log(`Default group already exists: ${existing.name} (${existing._id})`);
-      return existing;
+      return;
     }
 
-    const joinKeyHash = await bcrypt.hash(joinKey, this.saltRounds);
+    const joinKeyHash = await bcrypt.hash(joinKey, HASHING_SALT_ROUNDS);
 
     const created = await this.groupModel.create({
       name,
-      joinKeyId,
       joinKeyHash,
     });
 
     this.logger.log(`Default group created: ${created.name} (${created._id})`);
-    return created;
-  }
-
-  private toJoinKeyId(joinKey: string): string {
-    return createHash('sha256').update(joinKey, 'utf8').digest('hex');
   }
 }

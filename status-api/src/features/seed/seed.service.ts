@@ -20,7 +20,7 @@ export class SeedService implements OnApplicationBootstrap {
       throw new Error('Default group seeding configuration missing');
     }
 
-    await this.groupsService.ensureDefaultGroup(
+    await this.groupsService.ensureDefaultGroupExists(
       config.defaultGroupName,
       config.defaultGroupJoinKey);
   }

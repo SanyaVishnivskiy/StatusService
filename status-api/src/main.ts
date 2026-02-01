@@ -18,8 +18,8 @@ async function bootstrap() {
   const logger = new Logger(bootstrap.name);
   logger.log('Starting Status API...');
 
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(process.env.PORT ?? 3200);
   
-  logger.log(`Listening on port ${process.env.PORT ?? 3000}`);
+  logger.log(`Listening on port ${process.env.PORT ?? 3200}`);
 }
 bootstrap();

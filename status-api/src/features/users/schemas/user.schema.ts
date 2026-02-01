@@ -27,8 +27,8 @@ class UserGroup {
   @Prop({ required: true, type: Types.ObjectId })
   groupId: Types.ObjectId;
 
-  @Prop({ type: GroupData, default: () => ({}) })
-  data: GroupData;
+  @Prop({ type: GroupData, default: null })
+  data: GroupData | null;
 }
 
 @Schema({ timestamps: true })

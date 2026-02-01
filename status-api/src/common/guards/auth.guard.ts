@@ -18,15 +18,16 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid authorization header');
     }
 
+    const tokenParts = parts[1].split('.');
+    const username = tokenParts[0];
     const token = parts[1];
-    const user = await this.usersService.findByToken(token);
+    const user = await this.usersService.tryAuthenticate(username, token);
     
     if (!user) {
       throw new UnauthorizedException('Invalid token');
     }
 
     request.user = user;
-    await this.usersService.updateLastSeen(user._id.toString());
     return true;
   }
 }
